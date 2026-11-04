@@ -270,8 +270,8 @@ void parse(const std::string &text, Config &config, std::vector<std::string> &pr
         }
         if (name == "scale") {
             const std::string v = squash(value);
-            if (v == "1" || v == "2" || v == "3") config.scale = v[0] - '0';
-            else bad("scale is 1, 2 or 3, ignored");
+            if (v == "1" || v == "2" || v == "3" || v == "4") config.scale = v[0] - '0';
+            else bad("scale is 1, 2, 3 or 4, ignored");
             continue;
         }
         if (name == "mousespeed") {

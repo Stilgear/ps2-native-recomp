@@ -892,11 +892,12 @@ void menu_paint(bool show_again = true) {
     int w = 0, h = 0;
     window_pixels(w, h);
     if (g_menu.is_open()) {
+        g_scale_now = g_scale_next = static_cast<int>(ps2::video_scale());
         quickmenu::Values v;
         v.look = keymap::look_name(g_look);
         v.scale_now = g_scale_now;
         v.scale_next = g_scale_next;
-        v.scale_locked = g_scale_locked;
+        v.scale_locked = false;
         v.fullscreen = SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN;
         if (g_menu.on_keys_page()) {
             for (int a = 0; a < keymap::kChangeableCount; ++a) v.key_rows.push_back({keymap::action_label(a), keymap::keys_text(g_keys, a)});
@@ -1074,15 +1075,12 @@ void menu_command(quickmenu::Command c, int step) {
         return;
     case Command::look: cycle_look(step); break;
     case Command::scale:
-        if (g_scale_locked) {
-            set_notice("The resolution is set by PS2_SCALE; remove it to choose here");
-            break;
-        }
-        g_scale_next = (g_scale_next - 1 + step + 3) % 3 + 1;
+        g_scale_now = g_scale_next = (static_cast<int>(ps2::video_scale()) - 1 + step + 4) % 4 + 1;
+        ps2::set_video_scale(static_cast<std::uint32_t>(g_scale_next));
         g_keys.scale = g_scale_next;
         rewrite_keys_file([](const std::string &t) { return keymap::with_scale(t, g_scale_next); }, "resolution");
-        set_notice("Resolution " + std::to_string(g_scale_next) + "x" + (g_scale_next == g_scale_now ? "" : ": used when the game starts the next time"));
-        std::fprintf(stderr, "[menu] resolution %dx for the next start (this run: %dx)\n", g_scale_next, g_scale_now);
+        set_notice("Resolution " + std::to_string(g_scale_next) + "x");
+        std::fprintf(stderr, "[menu] resolution switched live to %dx\n", g_scale_next);
         break;
     case Command::fullscreen: toggle_fullscreen(); break;
     case Command::change_keys: g_key_note.clear(); break;  // (the menu has switched to its keys page)
@@ -1454,6 +1452,11 @@ void show_speed() {
     static std::uint64_t start = 0, frames = 0;
     static double cpu_start = 0.0, gpu_start = 0.0;
     const std::uint64_t now = SDL_GetPerformanceCounter();
+    const int cur_scale = static_cast<int>(ps2::video_scale());
+    if (cur_scale != g_keys.scale) {
+        g_scale_now = g_scale_next = g_keys.scale = cur_scale;
+        rewrite_keys_file([cur_scale](const std::string &t) { return keymap::with_scale(t, cur_scale); }, "resolution");
+    }
     if (!start) {
         start = now;
         cpu_start = process_cpu_seconds();
@@ -1765,13 +1768,14 @@ bool open_window(bool fullscreen) {
     load_keys();
     // The inner resolution: PS2_SCALE when it is set, else the 'scale' line of keys.ini (the quick menu writes it), else 1. It is read
     // when the graphics start (run_window, after this), so setting it here is in time.
-    g_scale_locked = !ps2::os::env("PS2_SCALE").empty();
-    if (!g_scale_locked && g_keys.scale >= 1 && g_keys.scale <= 3) {
-        ps2::os::set_env("PS2_SCALE", std::to_string(g_keys.scale));
-        std::fprintf(stderr, "[video] resolution %dx from %s (scale = %d)\n", g_keys.scale, g_keys_path.c_str(), g_keys.scale);
+    g_scale_locked = false;
+    if (ps2::os::env("PS2_SCALE").empty()) {
+        const int initial_scale = (g_keys.scale >= 1 && g_keys.scale <= 4) ? g_keys.scale : 3;
+        ps2::os::set_env("PS2_SCALE", std::to_string(initial_scale));
+        std::fprintf(stderr, "[video] resolution %dx (scale = %d)\n", initial_scale, initial_scale);
     }
-    g_scale_now = std::clamp(std::atoi(ps2::os::env("PS2_SCALE").c_str()), 1, 3);
-    g_scale_next = g_scale_locked ? g_scale_now : (g_keys.scale >= 1 ? g_keys.scale : g_scale_now);
+    g_scale_now = std::clamp(std::atoi(ps2::os::env("PS2_SCALE").c_str()), 1, 4);
+    g_scale_next = g_scale_now;
     Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0u);
 #ifdef __APPLE__
     if (!std::getenv("PS2_SDL_RENDERER")) flags |= SDL_WINDOW_METAL;
