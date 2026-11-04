@@ -6,6 +6,10 @@
 # which GCC lacks, so the probe uses them too and g++ is not tried.
 # The choice is kept in build/cxx_flags and reused while $CXX and the compiler
 # file are unchanged (delete the file to probe again), which saves the 4 s probe.
+# Strip Conda toolchain flags if active so system Clang uses native SteamOS libstdc++ and Zen 2 AVX2 flags
+if [[ "${CXX:-}${CXXFLAGS:-}${LDFLAGS:-}" == *conda* ]] || [[ "${CXX:-}${CXXFLAGS:-}${LDFLAGS:-}" == *Miniconda* ]]; then
+  unset CC CXX CFLAGS CXXFLAGS LDFLAGS CPPFLAGS
+fi
 cxx_flags=()
 cxx_stamp=
 cxx_cache="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/build/cxx_flags"

@@ -115,7 +115,7 @@ EOF
   esac
 fi
 "${py[@]}" -I "$here/disc.py" extract "$iso" "$game/disc" SYSTEM.CNF > /dev/null
-boot=$(sed -n 's/^BOOT2 *= *//p' "$game/disc/SYSTEM.CNF" | tr -d '\r')
+boot=$(sed -n 's/^[[:space:]]*BOOT2[[:space:]]*=[[:space:]]*//p' "$game/disc/SYSTEM.CNF" | tr -d '\r')
 program=${boot#*\\}
 program=${program%;*}
 [ -n "$program" ] || { echo "SYSTEM.CNF names no BOOT2 program" >&2; exit 1; }

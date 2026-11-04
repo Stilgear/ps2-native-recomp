@@ -6,7 +6,7 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 game=${1:-gt4}
 emsdk=${2:-${EMSDK:-$here/tools/emsdk}}
 out="$here/build/web-$game"
-boot=$(sed -n 's/^BOOT2 *= *//p' "$here/games/$game/disc/SYSTEM.CNF" | tr -d '\r')
+boot=$(sed -n 's/^[[:space:]]*BOOT2[[:space:]]*=[[:space:]]*//p' "$here/games/$game/disc/SYSTEM.CNF" | tr -d '\r')
 elf=$(ls "$here/games/$game/patched/"* 2>/dev/null | head -1)
 [ -n "$elf" ] || elf="$here/games/$game/core.elf"
 if [ ! -f "$elf" ]; then
