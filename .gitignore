@@ -7,7 +7,8 @@
 *.rar
 
 /generated/
-/tools/
+/tools/*
+!/tools/ps2_disc_toolkit/
 /build/
 
 *.ppm
