@@ -184,14 +184,7 @@ void decode_block(Voice &v, std::int16_t *out) {
     v.block[out == v.buffer ? 0 : 1] = at;
     block_end(v)[out == v.buffer ? 0 : 1] = (flags & 1u) != 0;
     if ((flags & 4u) && !v.lsax_written) v.lsax = at;
-    v.next = (at + 8) & kRamMask;
-    if (flags & 1u) {
-        v.next = v.lsax;
-        if (!(flags & 2u)) {
-            v.phase = kRelease;
-            v.env.level = 0;
-        }
-    }
+    v.next = (flags & 1u) ? v.lsax : ((at + 8) & kRamMask);
 }
 
 void key_on(Voice &v) {
@@ -279,7 +272,13 @@ void render_voice(Voice &v, unsigned voice, const Routing &route, std::int32_t (
         while ((position >> 12) >= 28) {
             position -= 28u << 12;
             std::memmove(v.buffer, v.buffer + 28, 28 * sizeof(std::int16_t));
-            v.end |= block_end(v)[0];
+            if (block_end(v)[0]) {
+                v.end = true;
+                if (!((g_ram[v.block[0] & kRamMask] >> 8) & 2u)) {
+                    v.phase = kRelease;
+                    v.env.level = 0;
+                }
+            }
             v.block[0] = v.block[1];
             block_end(v)[0] = block_end(v)[1];
             v.position = position;
@@ -825,8 +824,10 @@ void state(ps2::state::Stream &s) {
     for (Core &k : g_cores) {
         s.pod(k.voices);
         if (s.loading())
-            for (const Voice &v : k.voices)
+            for (Voice &v : k.voices) {
                 for (int i = 0; i < 2; ++i) block_end(v)[i] = (g_ram[v.block[i] & kRamMask] >> 8) & 1u;
+                if (v.phase == kOff && (block_end(v)[0] || block_end(v)[1])) v.end = true;
+            }
         s.pod(k.attr);
         s.pod(k.admas);
         s.pod(k.irqa);
