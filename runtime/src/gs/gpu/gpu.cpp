@@ -58,8 +58,10 @@ WGPUPresentMode g_present_mode = WGPUPresentMode_Fifo;
 std::uint32_t g_frame_latency = 0;  // pictures the swap chain may keep in flight; 0 = the library's default (2)
 std::uint32_t g_surface_width = 0, g_surface_height = 0;
 WGPURenderPipeline g_blit = nullptr;
+WGPUBindGroupLayout g_blit_layout = nullptr;
 WGPUBindGroup g_blit_group = nullptr;
 WGPUBuffer g_blit_params = nullptr;
+DisplaySource g_last_src = {};
 // The overlay (overlay.hpp): the quick menu's panel, drawn over the game's picture in the present pass with alpha blending. Its pixels
 // sit in a storage buffer like everything else here (no texture: the same code on every backend and in the browser build).
 struct Overlay {
@@ -73,7 +75,7 @@ struct Overlay {
 } g_overlay;
 std::uint32_t g_field = 0, g_last_width = 0, g_last_height = 0;
 bool g_have_previous = false;
-std::uint32_t g_scale = 1, g_copy_words = 1u << 20, g_field_words = 1u << 19;
+std::uint32_t g_scale = 3, g_copy_words = 1u << 20, g_field_words = 1u << 19;
 
 std::uint32_t field_base(std::uint32_t field) { return g_copy_words + (field & 1u) * g_field_words; }
 
@@ -1827,7 +1829,8 @@ bool init(Mode m) {
             g_bench.reps = std::clamp<unsigned long long>(reps, 1, 500);
         }
     }
-    if (const char *scale = std::getenv("PS2_SCALE")) g_scale = std::clamp<std::uint32_t>(static_cast<std::uint32_t>(std::atoi(scale)), 1u, 3u);
+    if (const char *scale = std::getenv("PS2_SCALE")) g_scale = std::clamp<std::uint32_t>(static_cast<std::uint32_t>(std::atoi(scale)), 1u, 4u);
+    ps2::set_video_scale(g_scale);
     g_copy_words = (1u << 20) * g_scale * g_scale;
     if (const int tile = std::atoi(os::env("PS2_TILE").c_str()); tile == 4 || tile == 8 || tile == 16) g_tile = tile;
     g_tiles_per_row = (2048 * static_cast<int>(g_scale) + g_tile - 1) / g_tile;
@@ -2489,6 +2492,8 @@ bool attach_surface(const SurfaceTarget &target) {
     ld.entryCount = 2;
     ld.entries = le;
     WGPUBindGroupLayout layout = wgpuDeviceCreateBindGroupLayout(g_device, &ld);
+    if (g_blit_layout) wgpuBindGroupLayoutRelease(g_blit_layout);
+    g_blit_layout = layout;
     WGPUPipelineLayoutDescriptor pld = WGPU_PIPELINE_LAYOUT_DESCRIPTOR_INIT;
     pld.bindGroupLayoutCount = 1;
     pld.bindGroupLayouts = &layout;
@@ -2517,12 +2522,115 @@ bool attach_surface(const SurfaceTarget &target) {
     be[1].buffer = g_blit_params;
     be[1].size = 32;
     WGPUBindGroupDescriptor bd = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
-    bd.layout = layout;
+    bd.layout = g_blit_layout;
     bd.entryCount = 2;
     bd.entries = be;
     g_blit_group = wgpuDeviceCreateBindGroup(g_device, &bd);
-    wgpuBindGroupLayoutRelease(layout);
     return g_blit != nullptr;
+}
+
+std::uint32_t scale() { return g_scale; }
+
+void set_scale(std::uint32_t new_scale) {
+    new_scale = std::clamp<std::uint32_t>(new_scale, 1u, 4u);
+    if (new_scale == g_scale || g_mode == Mode::off || !g_device) {
+        ps2::set_video_scale(g_scale);
+        return;
+    }
+    if (g_pending.busy) finish_download(g_pending.serial);
+    std::vector<std::uint32_t> base_vram(kMemorySize / 4);
+    download(reinterpret_cast<std::uint8_t *>(base_vram.data()), 0, kMemorySize);
+    wait_idle();
+
+    g_scale = new_scale;
+    ps2::set_video_scale(g_scale);
+    g_copy_words = (1u << 20) * g_scale * g_scale;
+    g_tiles_per_row = (2048 * static_cast<int>(g_scale) + g_tile - 1) / g_tile;
+    g_tile_count.assign(static_cast<std::size_t>(g_tiles_per_row) * g_tiles_per_row, 0);
+    g_tile_fill.assign(static_cast<std::size_t>(g_tiles_per_row) * g_tiles_per_row, 0);
+    g_field_words = (1u << 19) * g_scale * g_scale;
+
+    if (g_vram) wgpuBufferRelease(g_vram);
+    if (g_scratch) wgpuBufferRelease(g_scratch);
+    if (g_readback) wgpuBufferRelease(g_readback);
+    g_vram = make_buffer(static_cast<std::uint64_t>(kMemorySize) * g_scale * g_scale, WGPUBufferUsage_Storage | WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst);
+    g_scratch = make_buffer((static_cast<std::uint64_t>(g_copy_words) + 2ull * g_field_words) * 4, WGPUBufferUsage_Storage | WGPUBufferUsage_CopySrc);
+    g_readback = make_buffer(static_cast<std::uint64_t>(g_copy_words) * 4, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+
+    rebuild_group();
+    if (g_blit_layout && g_blit_params) {
+        if (g_blit_group) wgpuBindGroupRelease(g_blit_group);
+        WGPUBindGroupEntry be[2] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
+        be[0].binding = 0;
+        be[0].buffer = g_scratch;
+        be[0].size = WGPU_WHOLE_SIZE;
+        be[1].binding = 1;
+        be[1].buffer = g_blit_params;
+        be[1].size = 32;
+        WGPUBindGroupDescriptor bd = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+        bd.layout = g_blit_layout;
+        bd.entryCount = 2;
+        bd.entries = be;
+        g_blit_group = wgpuDeviceCreateBindGroup(g_device, &bd);
+    }
+
+    std::string shader_text;
+    if (const std::string path = os::env("PS2_GS_SHADER"); !path.empty()) {
+        if (std::FILE *f = os::open(path.c_str(), "rb")) {
+            char buffer[65536];
+            for (std::size_t n; (n = std::fread(buffer, 1, sizeof buffer, f)) > 0;) shader_text.append(buffer, n);
+            std::fclose(f);
+        }
+    }
+    WGPUShaderSourceWGSL source = WGPU_SHADER_SOURCE_WGSL_INIT;
+    source.code = shader_text.empty() ? view(kGsShader) : WGPUStringView{shader_text.data(), shader_text.size()};
+    WGPUShaderModuleDescriptor md = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
+    md.nextInChain = &source.chain;
+    const bool explicit_fma = g_dx12_compiler && std::strcmp(g_dx12_compiler, "DXC") == 0 && os::env("PS2_EXPLICIT_FMA") != "0";
+    WGPUShaderModule module = wgpuDeviceCreateShaderModule(g_device, &md);
+    for (int i = 0; i < kPipelines; ++i) {
+        if (g_pipelines[i]) wgpuComputePipelineRelease(g_pipelines[i]);
+        WGPUComputePipelineDescriptor cd = WGPU_COMPUTE_PIPELINE_DESCRIPTOR_INIT;
+        cd.layout = g_pipeline_layout;
+        cd.compute.module = module;
+        cd.compute.entryPoint = view(kEntryPoints[i]);
+        WGPUConstantEntry constants[3] = {WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT};
+        constants[0].key = view("SCALE");
+        constants[0].value = static_cast<double>(g_scale);
+        constants[1].key = view("TILE");
+        constants[1].value = static_cast<double>(g_tile);
+        constants[2].key = view("EXPLICIT_FMA");
+        constants[2].value = explicit_fma ? 1.0 : 0.0;
+        const bool has_tile = shader_text.empty() || shader_text.find("override TILE") != std::string::npos;
+        const bool has_fma = shader_text.empty() || shader_text.find("override EXPLICIT_FMA") != std::string::npos;
+        cd.compute.constantCount = has_tile ? (has_fma ? 3 : 2) : 1;
+        cd.compute.constants = constants;
+        g_pipelines[i] = wgpuDeviceCreateComputePipeline(g_device, &cd);
+    }
+    wgpuShaderModuleRelease(module);
+
+    g_have_previous = false;
+    write_state(base_vram, 1, {});
+    if (g_last_src.width > 0 && g_last_src.height > 0 && g_blit_params) {
+        const std::uint32_t current = field_base(g_field), previous = field_base(g_field + 1);
+        const std::uint32_t param = push_params({g_last_src.fbp, g_last_src.fbw, g_last_src.psm, g_last_src.dbx, g_last_src.dby, g_last_src.width, g_last_src.height, g_last_src.halved ? 1u : 0u, current});
+        g_commands.push_back({kDisplay, (g_last_src.width * g_scale + 7) / 8, (g_last_src.height * g_scale + 7) / 8, param});
+        const float sw = static_cast<float>(g_surface_width), sh = static_cast<float>(g_surface_height);
+        const float aspect = g_options.widescreen ? 16.0f / 9.0f : 4.0f / 3.0f;
+        const float vw = std::min(sw, sh * aspect), vh = vw / aspect;
+        const std::uint32_t blit[8] = {g_last_src.width * g_scale, g_last_src.height * g_scale, current, previous, 0u, static_cast<std::uint32_t>(vw), static_cast<std::uint32_t>(vh), ps2::video_options()};
+        wgpuQueueWriteBuffer(g_queue, g_blit_params, 0, blit, sizeof blit);
+        ++g_field;
+        g_have_previous = true;
+        submit();
+        wait_idle();
+    }
+    std::fprintf(stderr, "[gpu] resolution scale switched to %ux\n", g_scale);
+}
+
+void apply_pending_scale() {
+    const std::uint32_t wanted = std::clamp<std::uint32_t>(ps2::video_scale(), 1u, 4u);
+    if (wanted != g_scale) set_scale(wanted);
 }
 
 void resize_surface(std::uint32_t width, std::uint32_t height) {
@@ -2633,6 +2741,8 @@ std::uint32_t display_params(const DisplaySource &src, std::uint32_t scratch_at)
 
 bool present(const DisplaySource &src) {
     if (!g_surface) return false;
+    g_last_src = src;
+    apply_pending_scale();
     static PresentLog log;
     const double flush0 = log.flush, acquire0 = log.acquire, submit0 = log.submit, present0 = log.present;
     if (log.on) log.mark = PresentLog::Clock::now();
@@ -2820,7 +2930,9 @@ void set_overlay(const std::uint32_t *rgba, std::uint32_t width, std::uint32_t h
 }
 
 bool present_again() {
-    if (!g_surface || !g_have_previous) return false;
+    if (!g_surface) return false;
+    apply_pending_scale();
+    if (!g_have_previous) return false;
     // the same picture as the last present (its fields are still in the scratch buffer: the game draws nothing while it waits), with the
     // window's size and the picture look of now
     const float sw = static_cast<float>(g_surface_width), sh = static_cast<float>(g_surface_height);
@@ -2860,6 +2972,8 @@ Copy g_copies[3];
 std::uint64_t g_copy_order = 0;
 
 bool display_async(const DisplaySource &src, std::vector<std::uint32_t> &rgba, std::uint32_t &width, std::uint32_t &height) {
+    g_last_src = src;
+    apply_pending_scale();
 #ifdef __EMSCRIPTEN__
     wgpuInstanceProcessEvents(g_instance);
 #else
@@ -2922,6 +3036,8 @@ bool display_async(const DisplaySource &src, std::vector<std::uint32_t> &rgba, s
 }
 
 bool display(const DisplaySource &src, std::vector<std::uint32_t> &rgba, std::uint32_t &width, std::uint32_t &height) {
+    g_last_src = src;
+    apply_pending_scale();
     flush_all();
     const std::uint32_t param = display_params(src, 0);
     g_commands.push_back({kDisplay, (src.width * g_scale + 7) / 8, (src.height * g_scale + 7) / 8, param});
