@@ -1,3 +1,4 @@
+#include "ps2/disc_bundle.hpp"
 #include "ps2/os.hpp"
 #include "ps2/system.hpp"
 #include "ps2/ee_live.hpp"
@@ -550,7 +551,10 @@ int main(int argc, char **argv) {
         argv = utf8_argv.data();
     }
 #endif
-    if (argc < 2) return usage();
+    ps2::disc::SelfBundleInfo bundle_info;
+    const bool use_self_bundle = (argc < 2 || std::string_view(argv[1]).rfind("--", 0) == 0) &&
+                                 ps2::disc::detect_self_bundle(&bundle_info);
+    if (!use_self_bundle && argc < 2) return usage();
 #ifdef _WIN32
     SetConsoleCtrlHandler(on_console_event, TRUE);
     SetUnhandledExceptionFilter(on_crash);
@@ -562,16 +566,26 @@ int main(int argc, char **argv) {
 #else
     std::atexit([] { ps2::flush_memory_card(); });
 #endif
-    std::vector<std::string> args{argv[1]};
+    const std::string elf_load_path = use_self_bundle ? std::string(ps2::disc::kBundleSentinel) : std::string(argv[1]);
+    std::vector<std::string> args{use_self_bundle ? bundle_info.boot_elf_arg : std::string(argv[1])};
     [[maybe_unused]] bool window = false, fullscreen = false;
     std::string load_path;
     bool no_record = false;
-    ps2::g_options.program_path = argv[1];
+    ps2::g_options.program_path = use_self_bundle ? bundle_info.exe_path : std::string(argv[1]);
+    if (use_self_bundle) {
+        ps2::g_options.disc_path = ps2::disc::kBundleSentinel;
+        ps2::g_options.widescreen = true;
+        const std::string saves_dir = ps2::disc::bundle_writable_data_dir();
+        if (!saves_dir.empty()) {
+            ps2::g_options.memcard_path = saves_dir + "/memcard.ps2";
+            ps2::g_options.quick_dir = saves_dir;
+        }
+    }
     for (int i = 0; i < argc; ++i) {
         const std::string a = argv[i];
         ps2::g_options.command_line += (i ? " " : "") + (a.find_first_of(" \t") == std::string::npos ? a : "\"" + a + "\"");
     }
-    for (int i = 2; i < argc; ++i) {
+    for (int i = use_self_bundle ? 1 : 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--arg" && i + 1 < argc) args.push_back(argv[++i]);
         else if (a == "--frames" && i + 1 < argc) ps2::g_options.max_frames = std::strtoull(argv[++i], nullptr, 10);
@@ -624,6 +638,9 @@ int main(int argc, char **argv) {
         else if (a == "--quick-dir" && i + 1 < argc) ps2::g_options.quick_dir = argv[++i];
         else return usage();
     }
+#ifdef PS2_WINDOW
+    if (use_self_bundle && !window && ps2::g_options.max_frames == 0) window = true;
+#endif
     std::sort(ps2::g_options.frame_capture_frames.begin(), ps2::g_options.frame_capture_frames.end());
     ps2::g_options.frame_capture_frames.erase(
         std::unique(ps2::g_options.frame_capture_frames.begin(), ps2::g_options.frame_capture_frames.end()),
@@ -648,11 +665,16 @@ int main(int argc, char **argv) {
     // patched/<program>, or core.elf at the top), so the folder is the program's own or the one above it. The disc image is no
     // guide on its own: port.sh hard-links it into the game folder, but a hard link cannot reach another drive, and an image on
     // another drive is played from where it is, with no vu1 folder next to it. Next to the disc image is still looked at last.
-    if (window && ps2::os::env("PS2_VU_RECORD").empty()) {
+    if (window && !use_self_bundle && ps2::os::env("PS2_VU_RECORD").empty()) {
         std::error_code error;
         std::vector<std::filesystem::path> places;
-        const std::filesystem::path program = std::filesystem::absolute(ps2::os::path(argv[1]), error);
-        if (!error) places = {program.parent_path(), program.parent_path().parent_path()};
+        const std::filesystem::path program = std::filesystem::absolute(ps2::os::path(elf_load_path), error);
+        if (!error) {
+            const auto p1 = program.parent_path();
+            const auto p2 = p1.parent_path();
+            const auto p3 = p2.parent_path();
+            places = {p1, p2, p3};
+        }
         if (!ps2::g_options.disc_path.empty()) {
             const std::filesystem::path disc = std::filesystem::absolute(ps2::os::path(ps2::g_options.disc_path), error);
             if (!error) places.push_back(disc.parent_path());
@@ -673,20 +695,26 @@ int main(int argc, char **argv) {
     // The libraries go next to the game: the game folder that port.sh made (the one with the vu1 folder), else the program's own folder.
     {
         const std::string setting = ps2::os::env("PS2_VU_LIVE");
-        if (setting != "0" && setting != "off" && (window || !setting.empty())) {
+        if (setting != "0" && setting != "off" && (window || !setting.empty() || use_self_bundle)) {
             std::string cache = setting == "1" || setting == "on" ? std::string() : setting;
-            if (cache.empty()) {
+            if (cache.empty() && use_self_bundle) {
+                cache = ps2::disc::ensure_bundle_live_cache("vu1-live");
+            }
+            if (cache.empty() && !use_self_bundle) {
                 std::error_code error;
-                const std::filesystem::path program = std::filesystem::absolute(ps2::os::path(argv[1]), error);
-                std::filesystem::path place = program.parent_path();
-                for (const std::filesystem::path &candidate : {program.parent_path(), program.parent_path().parent_path()})
+                const std::filesystem::path program = std::filesystem::absolute(ps2::os::path(elf_load_path), error);
+                const auto p1 = program.parent_path();
+                const auto p2 = p1.parent_path();
+                const auto p3 = p2.parent_path();
+                std::filesystem::path place = p1;
+                for (const std::filesystem::path &candidate : {p1, p2, p3})
                     if (std::filesystem::is_directory(candidate / "vu1", error)) {
                         place = candidate;
                         break;
                     }
                 cache = ps2::os::utf8((place / "vu1-live").lexically_normal());
             }
-            ps2::vu::live::start(cache);
+            if (!cache.empty()) ps2::vu::live::start(cache);
         }
     }
     register_generated_code();
@@ -697,29 +725,43 @@ int main(int argc, char **argv) {
     // The libraries go next to the game like the vector programs'; entries.txt and overlays\ of the game folder get what was found.
     {
         const std::string setting = ps2::os::env("PS2_EE_LIVE");
-        if (setting != "0" && setting != "off" && (window || !setting.empty())) {
-            std::error_code error;
-            const std::filesystem::path program = std::filesystem::absolute(ps2::os::path(argv[1]), error);
-            std::filesystem::path place = program.parent_path(), game_dir;
-            for (const std::filesystem::path &candidate : {program.parent_path(), program.parent_path().parent_path()})
-                if (std::filesystem::is_directory(candidate / "vu1", error) || std::filesystem::is_regular_file(candidate / "entries.txt", error)) {
-                    place = candidate;
-                    break;
+        if (setting != "0" && setting != "off" && (window || !setting.empty() || use_self_bundle)) {
+            std::string cache = setting == "1" || setting == "on" ? std::string() : setting;
+            std::filesystem::path game_dir;
+            if (cache.empty() && use_self_bundle) {
+                cache = ps2::disc::ensure_bundle_live_cache("ee-live");
+                if (cache.empty() && window) {
+                    const std::string saves_dir = ps2::disc::bundle_writable_data_dir();
+                    if (!saves_dir.empty()) cache = saves_dir + "/ee-live";
                 }
-            for (const std::filesystem::path &candidate : {program.parent_path(), program.parent_path().parent_path()})
-                if (std::filesystem::is_regular_file(candidate / "entries.txt", error)) {
-                    game_dir = candidate;
-                    break;
-                }
-            const std::string cache = setting.empty() || setting == "1" || setting == "on" ? ps2::os::utf8((place / "ee-live").lexically_normal()) : setting;
-            ps2::ee::live::start(argv[1], cache, ps2::os::utf8(game_dir));
+            }
+            if (!use_self_bundle) {
+                std::error_code error;
+                const std::filesystem::path program = std::filesystem::absolute(ps2::os::path(elf_load_path), error);
+                const auto p1 = program.parent_path();
+                const auto p2 = p1.parent_path();
+                const auto p3 = p2.parent_path();
+                std::filesystem::path place = p1;
+                for (const std::filesystem::path &candidate : {p1, p2, p3})
+                    if (std::filesystem::is_directory(candidate / "vu1", error) || std::filesystem::is_regular_file(candidate / "entries.txt", error)) {
+                        place = candidate;
+                        break;
+                    }
+                for (const std::filesystem::path &candidate : {p1, p2, p3})
+                    if (std::filesystem::is_regular_file(candidate / "entries.txt", error)) {
+                        game_dir = candidate;
+                        break;
+                    }
+                if (cache.empty()) cache = ps2::os::utf8((place / "ee-live").lexically_normal());
+            }
+            if (!cache.empty()) ps2::ee::live::start(elf_load_path, cache, ps2::os::utf8(game_dir));
         }
     }
     const auto emulate = [&]() -> int {
         name_thread(L"ps2 emulation");
         std::uint32_t entry = 0;
-        if (!ps2::load_elf(argv[1], entry)) {
-            std::fprintf(stderr, "cannot load %s\n", argv[1]);
+        if (!ps2::load_elf(elf_load_path, entry)) {
+            std::fprintf(stderr, "cannot load %s\n", elf_load_path.c_str());
             return 1;
         }
         ps2::boot(entry, args);

@@ -11,6 +11,7 @@
 #include "iop/spu2.hpp"
 #include "ipu/ipu.hpp"
 #include "ps2/disc.hpp"
+#include "ps2/disc_bundle.hpp"
 #include "ps2/ee_live.hpp"
 #include "kernel.hpp"
 #include "load_stats.hpp"
@@ -622,9 +623,14 @@ std::string quick_newest_state() { return {}; }
 std::uint64_t frame_count() { return g_frames; }
 
 bool load_elf(const std::string &path, std::uint32_t &entry) {
-    std::ifstream file(os::path(path), std::ios::binary);
-    if (!file) return false;
-    const std::vector<std::uint8_t> data{std::istreambuf_iterator<char>(file), {}};
+    std::vector<std::uint8_t> data;
+    if (path == disc::kBundleSentinel) {
+        if (!disc::read_bundle_asset("boot.elf", data)) return false;
+    } else {
+        std::ifstream file(os::path(path), std::ios::binary);
+        if (!file) return false;
+        data.assign(std::istreambuf_iterator<char>(file), {});
+    }
     if (data.size() < 52 || std::memcmp(data.data(), "\x7f" "ELF", 4) != 0) return false;
     const auto u32 = [&](std::size_t o) { std::uint32_t v; std::memcpy(&v, data.data() + o, 4); return v; };
     const auto u16 = [&](std::size_t o) { std::uint16_t v; std::memcpy(&v, data.data() + o, 2); return v; };

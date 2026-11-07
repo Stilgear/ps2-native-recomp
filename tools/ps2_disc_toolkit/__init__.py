@@ -35,3 +35,5 @@ from .ps2_audio import (  # noqa: F401
     decode_vag_to_wav_bytes,
     decode_spu2_adpcm_blocks,
 )
+from .bundler import build_single_file_bundle  # noqa: F401
+
